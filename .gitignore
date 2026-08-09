@@ -1,0 +1,10 @@
+bin/
+*.exe
+vendor/
+.env
+*.log
+*.test
+/treasury-orchestration
+coverage.out
+*.testcoverage.out
+/migrate
