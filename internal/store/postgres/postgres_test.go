@@ -276,3 +276,51 @@ func TestJoinStrings(t *testing.T) {
 		}
 	}
 }
+
+// TestDB_WithOutboxMethodsReturnErrors exercises the DB-level *WithOutbox
+// Unit methods against the unreachable pool: OpenBatchWithOutbox,
+// CreateFundingWithOutbox, AddFloatWithOutbox. Each should return a
+// connection error (the tx Begin fails fast). buildEvents is not invoked
+// because the Begin error short-circuits.
+func TestDB_WithOutboxMethodsReturnErrors(t *testing.T) {
+	d := newUnreachableDB(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	id := uuid.New()
+
+	if _, err := d.OpenBatchWithOutbox(ctx, "BTC/USD", func(b *store.Batch) []*store.OutboxEntry {
+		t.Fatal("buildEvents must not be called when Begin fails")
+		return nil
+	}); err == nil {
+		t.Fatal("OpenBatchWithOutbox: expected error")
+	}
+
+	fp := &store.FloatPosition{FiatCurrency: "USD", ShortFiatAmount: decimal.NewFromInt(1), LongCryptoAmount: decimal.NewFromFloat(0.01), LongCryptoAsset: "BTC"}
+	if _, err := d.AddFloatWithOutbox(ctx, fp, []*store.OutboxEntry{{Aggregate: "float", EventType: "float.adjust", DedupKey: "k", Payload: []byte("{}")}}); err == nil {
+		t.Fatal("AddFloatWithOutbox: expected error")
+	}
+
+	fr := &store.FundingRequest{WalletID: "w", Asset: "BTC", Amount: decimal.NewFromInt(1), Status: store.FundingPending}
+	if _, err := d.CreateFundingWithOutbox(ctx, fr, []*store.OutboxEntry{{Aggregate: "funding", EventType: "funding.create", DedupKey: "k", Payload: []byte("{}")}}); err == nil {
+		t.Fatal("CreateFundingWithOutbox: expected error")
+	}
+
+	// UpdateBatchStatusWithOutbox with nil events slice: still fails at Begin.
+	if _, _, err := d.UpdateBatchStatusWithOutbox(ctx, id, store.BatchOpen, store.BatchClosed, nil, nil); err == nil {
+		t.Fatal("UpdateBatchStatusWithOutbox(nil events): expected error")
+	}
+}
+
+// TestDB_OpenWithNilEvents ensures the *WithOutbox methods tolerate nil
+// entries in the events slice on the error path (the Begin failure
+// short-circuits before iteration, so this just guards the contract).
+func TestDB_OpenWithNilEvents(t *testing.T) {
+	d := newUnreachableDB(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	events := []*store.OutboxEntry{nil, {Aggregate: "a", EventType: "e", DedupKey: "k", Payload: []byte("{}")}, nil}
+	fp := &store.FloatPosition{FiatCurrency: "USD", ShortFiatAmount: decimal.NewFromInt(1)}
+	if _, err := d.AddFloatWithOutbox(ctx, fp, events); err == nil {
+		t.Fatal("expected error with nil-containing events")
+	}
+}

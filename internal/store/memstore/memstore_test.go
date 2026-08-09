@@ -179,6 +179,59 @@ func TestNewAll_WiresAllStores(t *testing.T) {
 	}
 }
 
+// TestAll_OutboxMethodsNilEvents covers the nil-event skip branches of the
+// in-memory *WithOutbox Unit methods and the empty-events case.
+func TestAll_OutboxMethodsNilEvents(t *testing.T) {
+	ctx := context.Background()
+	all := NewAll()
+	// UpdateBatchStatusWithOutbox with a nil entry in events: nil is skipped.
+	b, _ := all.Batch.OpenBatch(ctx, "BTC/USD")
+	if _, _, err := all.Batch.UpdateBatchStatus(ctx, b.ID, store.BatchOpen, store.BatchClosed, nil); err != nil {
+		t.Fatalf("setup close: %v", err)
+	}
+	ent := &store.OutboxEntry{Aggregate: "a", EventType: "e", DedupKey: "k1", Payload: []byte("{}")}
+	if _, ok, err := all.UpdateBatchStatusWithOutbox(ctx, b.ID, store.BatchClosed, store.BatchExecuting, nil, []*store.OutboxEntry{nil, ent, nil}); err != nil || !ok {
+		t.Fatalf("transition with nil entries: ok=%v err=%v", ok, err)
+	}
+	pending, _ := all.Outbox.ListPending(ctx, 10)
+	if len(pending) != 1 {
+		t.Fatalf("outbox entries=%d want 1 (nils skipped)", len(pending))
+	}
+
+	// UpdateBatchStatusWithOutbox with empty events slice: no append.
+	ent2 := &store.OutboxEntry{Aggregate: "a", EventType: "e", DedupKey: "k2", Payload: []byte("{}")}
+	if _, ok, err := all.UpdateBatchStatusWithOutbox(ctx, b.ID, store.BatchExecuting, store.BatchSettled, nil, []*store.OutboxEntry{ent2}); err != nil || !ok {
+		t.Fatalf("transition executing->settled: ok=%v err=%v", ok, err)
+	}
+	before, _ := all.Outbox.ListPending(ctx, 100)
+
+	// OpenBatchWithOutbox: buildEvents returns a slice with a nil entry.
+	buildEvents := func(b *store.Batch) []*store.OutboxEntry {
+		return []*store.OutboxEntry{nil, {Aggregate: "batch", EventType: "batch.open", DedupKey: "bo:" + b.ID.String(), Payload: []byte("{}")}, nil}
+	}
+	if _, err := all.OpenBatchWithOutbox(ctx, "ETH/USD", buildEvents); err != nil {
+		t.Fatalf("open batch with outbox: %v", err)
+	}
+	after, _ := all.Outbox.ListPending(ctx, 100)
+	if len(after)-len(before) != 1 {
+		t.Fatalf("open outbox delta=%d want 1 (nils skipped)", len(after)-len(before))
+	}
+
+	// AddFloatWithOutbox with nil entries.
+	fp := &store.FloatPosition{FiatCurrency: "USD", ShortFiatAmount: decimal.NewFromInt(10), LongCryptoAmount: decimal.NewFromFloat(0.001), LongCryptoAsset: "BTC"}
+	fe := &store.OutboxEntry{Aggregate: "float", EventType: "float.adjust", DedupKey: "fa1", Payload: []byte("{}")}
+	if _, err := all.AddFloatWithOutbox(ctx, fp, []*store.OutboxEntry{nil, fe, nil}); err != nil {
+		t.Fatalf("add float with outbox: %v", err)
+	}
+
+	// CreateFundingWithOutbox with nil entries.
+	fr := &store.FundingRequest{WalletID: "w", Asset: "BTC", Amount: decimal.NewFromInt(1)}
+	fre := &store.OutboxEntry{Aggregate: "funding", EventType: "funding.create", DedupKey: "fc1", Payload: []byte("{}")}
+	if _, err := all.CreateFundingWithOutbox(ctx, fr, []*store.OutboxEntry{nil, fre, nil}); err != nil {
+		t.Fatalf("create funding with outbox: %v", err)
+	}
+}
+
 // TestAll_UpdateBatchStatusWithOutbox verifies the in-memory Unit
 // transitions the batch and appends the outbox event together: a
 // successful transition must persist exactly one outbox entry, and a

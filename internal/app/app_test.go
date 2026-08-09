@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -338,5 +339,134 @@ func TestFiatOfAndCryptoOf(t *testing.T) {
 		if got := cryptoOf(c.in); got != c.crypto {
 			t.Errorf("cryptoOf(%q)=%q want %q", c.in, got, c.crypto)
 		}
+	}
+}
+
+// TestSplitCSV exercises the CSV parser helper including whitespace
+// trimming and empty-skip behavior.
+func TestSplitCSV(t *testing.T) {
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{"", []string{}},
+		{"   ", []string{}},
+		{"a", []string{"a"}},
+		{"a,b,c", []string{"a", "b", "c"}},
+		{" a , b , c ", []string{"a", "b", "c"}},
+		{"a,,b", []string{"a", "b"}},
+		{" a , , b ", []string{"a", "b"}},
+		{",a,b,", []string{"a", "b"}},
+	}
+	for _, c := range cases {
+		got := splitCSV(c.in)
+		if len(got) != len(c.want) {
+			t.Errorf("splitCSV(%q)=%v want %v", c.in, got, c.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("splitCSV(%q)[%d]=%q want %q", c.in, i, got[i], c.want[i])
+			}
+		}
+	}
+}
+
+// TestHTTPHealth exercises the /healthz probe returned by httpHealth for
+// the healthy (2xx), unhealthy (non-2xx), and transport-error cases.
+func TestHTTPHealth(t *testing.T) {
+	// Healthy: 2xx.
+	srvOK := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/healthz" {
+			t.Errorf("path=%s want /healthz", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srvOK.Close()
+	if err := httpHealth(srvOK.URL)(context.Background()); err != nil {
+		t.Fatalf("healthy: %v", err)
+	}
+	// Trailing slash on baseURL is trimmed.
+	if err := httpHealth(srvOK.URL + "/")(context.Background()); err != nil {
+		t.Fatalf("healthy with trailing slash: %v", err)
+	}
+
+	// Unhealthy: 5xx.
+	srvBad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srvBad.Close()
+	if err := httpHealth(srvBad.URL)(context.Background()); err == nil {
+		t.Fatal("expected error for 5xx")
+	}
+
+	// Transport error: closed server.
+	srvClosed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	srvClosed.Close()
+	if err := httpHealth(srvClosed.URL)(context.Background()); err == nil {
+		t.Fatal("expected transport error")
+	}
+}
+
+// TestBuildAudit_KafkaBrokers covers the buildAudit branches: KAFKA_BROKERS
+// set with a valid (but non-Kafka) listener succeeds in DEV_MODE.
+func TestBuildAudit_KafkaBrokers(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	t.Setenv("KAFKA_BROKERS", ln.Addr().String())
+	au, err := buildAudit(true)
+	if err != nil {
+		t.Fatalf("buildAudit(dev): %v", err)
+	}
+	if au == nil {
+		t.Fatal("expected non-nil audit client")
+	}
+}
+
+func TestBuildAudit_KafkaBrokersDevFallback(t *testing.T) {
+	// Invalid brokers (empty after split) -> error in dev, which falls back
+	// to fake audit in DEV_MODE.
+	t.Setenv("KAFKA_BROKERS", ",,")
+	au, err := buildAudit(true)
+	if err != nil {
+		t.Fatalf("buildAudit(dev) should fall back: %v", err)
+	}
+	if au == nil {
+		t.Fatal("expected non-nil fake audit")
+	}
+}
+
+func TestBuildAudit_NoBrokersProd(t *testing.T) {
+	t.Setenv("KAFKA_BROKERS", "")
+	if _, err := buildAudit(false); err == nil {
+		t.Fatal("expected error for no brokers in prod")
+	}
+}
+
+func TestBuildAudit_KafkaBrokersProdError(t *testing.T) {
+	// Empty brokers (after split) -> NewKafkaAudit error in prod (no fallback).
+	t.Setenv("KAFKA_BROKERS", ",,")
+	if _, err := buildAudit(false); err == nil {
+		t.Fatal("expected error for empty brokers in prod")
+	}
+}
+
+func TestBuildDownstreamClients_AllDev(t *testing.T) {
+	dc, err := buildDownstreamClients(config.Config{}, true)
+	if err != nil {
+		t.Fatalf("buildDownstreamClients dev: %v", err)
+	}
+	if dc.liquidity == nil || dc.fx == nil || dc.wallet == nil || dc.ledger == nil || dc.audit == nil {
+		t.Fatal("expected all clients wired")
+	}
+}
+
+func TestBuildDownstreamClients_ProdNoURLs(t *testing.T) {
+	// In prod mode with no URLs, buildLiquidity fails first.
+	if _, err := buildDownstreamClients(config.Config{}, false); err == nil {
+		t.Fatal("expected error in prod with no URLs")
 	}
 }
